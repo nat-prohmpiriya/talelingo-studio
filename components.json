@@ -1,0 +1,33 @@
+{
+	"$schema": "https://shadcn-svelte.com/schema.json",
+	"imports": {
+		"$lib/components": "src/lib/components",
+		"$lib/utils": "src/lib/utils"
+	},
+	"aliases": {
+		"components": "$lib/components",
+		"utils": "$lib/utils",
+		"components/ui": "$lib/components/ui"
+	},
+	"files": {
+		"typescript": true,
+		"filenameCase": "kebab",
+		"prefix": "",
+		"srcLib": "src/lib",
+		"srcRoutes": "src/routes"
+	},
+	"styling": {
+		"postcss": true,
+		"tailwind": {
+			"baseColor": "slate",
+			"css": "src/routes/layout.css",
+			"cssVariables": true,
+			"config": "tailwind.config.js",
+			"prefix": ""
+		}
+	},
+	"types": {
+		"types": "./src/app.d.ts"
+	},
+	"ui": "svelte"
+}

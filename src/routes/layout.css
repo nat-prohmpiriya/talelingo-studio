@@ -1,1 +1,7 @@
 @import 'tailwindcss';
+
+@theme {
+	--color-primary: oklch(70.7% 0.165 254.624);
+	--color-primary-hover: oklch(65% 0.165 254.624);
+	--color-primary-light: oklch(95% 0.1 254.624);
+}
