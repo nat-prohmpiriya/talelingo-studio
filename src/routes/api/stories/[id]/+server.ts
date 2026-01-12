@@ -1,54 +1,44 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { db } from '$lib/server/db';
-import { stories, episodes } from '$lib/server/db/schema';
-import { eq } from 'drizzle-orm';
+import { StoryService } from '$lib/server/services/Story.service';
+import type { IStory } from '$lib/server/models/Story.model';
 
-// GET /api/stories/:id - Get single story with episodes
+/**
+ * GET /api/stories/:id
+ * Get single story by ID
+ */
 export const GET: RequestHandler = async ({ params }) => {
 	try {
-		// Get story
-		const [story] = await db.select().from(stories).where(eq(stories.id, params.id));
+		const story = await StoryService.getStoryById(params.id);
 
 		if (!story) {
 			return json({ error: 'Story not found' }, { status: 404 });
 		}
 
-		// Get episodes
-		const storyEpisodes = await db
-			.select()
-			.from(episodes)
-			.where(eq(episodes.storyId, params.id))
-			.orderBy(episodes.episodeNumber);
-
-		return json({
-			...story,
-			episodes: storyEpisodes
-		});
+		return json(story);
 	} catch (error) {
 		console.error('Failed to fetch story:', error);
 		return json({ error: 'Failed to fetch story' }, { status: 500 });
 	}
 };
 
-// PATCH /api/stories/:id - Update story
+/**
+ * PATCH /api/stories/:id
+ * Update story by ID
+ *
+ * Body: Partial<IStory> (excluding direct episode updates)
+ */
 export const PATCH: RequestHandler = async ({ params, request }) => {
 	try {
 		const body = await request.json();
-		const { status, currentStep, content, reviewNotes } = body;
 
-		// Build update object
-		const update: any = {};
-		if (status) update.status = status;
-		if (currentStep) update.currentStep = currentStep;
-		if (content) update.content = JSON.stringify(content);
-		update.updatedAt = new Date();
+		const story = await StoryService.getStoryById(params.id);
+		if (!story) {
+			return json({ error: 'Story not found' }, { status: 404 });
+		}
 
-		const [updated] = await db
-			.update(stories)
-			.set(update)
-			.where(eq(stories.id, params.id))
-			.returning();
+		// Update by slug since slug is our unique identifier
+		const updated = await StoryService.updateStory(story.slug, body);
 
 		return json(updated);
 	} catch (error) {
@@ -57,10 +47,18 @@ export const PATCH: RequestHandler = async ({ params, request }) => {
 	}
 };
 
-// DELETE /api/stories/:id - Delete story
+/**
+ * DELETE /api/stories/:id
+ * Delete story by ID
+ */
 export const DELETE: RequestHandler = async ({ params }) => {
 	try {
-		await db.delete(stories).where(eq(stories.id, params.id));
+		const story = await StoryService.getStoryById(params.id);
+		if (!story) {
+			return json({ error: 'Story not found' }, { status: 404 });
+		}
+
+		await StoryService.deleteStory(story.slug);
 		return json({ success: true });
 	} catch (error) {
 		console.error('Failed to delete story:', error);

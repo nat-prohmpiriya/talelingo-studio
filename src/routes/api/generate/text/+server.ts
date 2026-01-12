@@ -1,11 +1,15 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { generateStoryText } from '$lib/server/ai/story';
-import { db } from '$lib/server/db';
-import { stories } from '$lib/server/db/schema';
-import { eq } from 'drizzle-orm';
+import { StoryService } from '$lib/server/services/Story.service';
 
-// POST /api/generate/text - Generate story text
+/**
+ * POST /api/generate/text
+ * Generate story text using AI
+ *
+ * Body:
+ * - storyId: string (MongoDB _id)
+ */
 export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const body = await request.json();
@@ -16,19 +20,24 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 
 		// Get story
-		const story = await db.query.stories.findFirst({
-			where: eq(stories.id, storyId)
-		});
+		const story = await StoryService.getStoryById(storyId);
 
 		if (!story) {
 			return json({ error: 'Story not found' }, { status: 404 });
 		}
 
-		// Parse config
-		const config = JSON.parse(story.config || '{}');
+		// Build config from story
+		const config = {
+			titleEn: story.title.en,
+			titleTh: story.title.th,
+			level: story.level,
+			category: story.category,
+			episodeCount: story.episodes?.length || 5,
+			artStyle: story.artStyle || 'watercolor'
+		};
 
-		// Generate story text
-		const result = await generateStoryText(storyId, config);
+		// Generate story text (this updates the story in DB)
+		const result = await generateStoryText(storyId, config as any);
 
 		return json({
 			success: true,

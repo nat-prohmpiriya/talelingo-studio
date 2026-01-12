@@ -1,16 +1,17 @@
 /**
  * Story Generation using Vercel AI SDK
+ * Now uses MongoDB (Mongoose) instead of SQLite
  */
 
 import { generateText, streamText } from 'ai';
-import { getModel, MODELS } from './providers';
-import { db } from '$lib/server/db';
-import { stories, episodes, jobs } from '$lib/server/db/schema';
-import { eq } from 'drizzle-orm';
+import { getModel } from './providers';
+import getStoryModel, { IStory } from '$lib/server/models/Story.model';
+import dbConnect from '$lib/server/db/mongodb';
 
 // Story generation types
 export interface StoryConfig {
 	titleEn: string;
+	titleTh?: string;
 	level: 'A1' | 'A2' | 'B1' | 'B2';
 	category: string;
 	episodeCount: number;
@@ -20,8 +21,9 @@ export interface StoryConfig {
 export interface GeneratedPage {
 	pageNumber: number;
 	textEn: string;
+	textTh?: string;
 	vocab: WordEntry[];
-	translation?: {
+	translations?: {
 		th?: string;
 		ja?: string;
 		zh?: string;
@@ -78,10 +80,12 @@ FORMAT - Return ONLY valid JSON:
     {
       "episodeNumber": 1,
       "titleEn": "Episode Title",
+      "titleTh": "Thai Title",
       "pages": [
         {
           "pageNumber": 1,
           "textEn": "Page text here...",
+          "textTh": "Thai translation...",
           "vocab": [
             {"word": "example", "definition": "a representative form", "cefrLevel": "A2"}
           ]
@@ -106,31 +110,64 @@ STYLE GUIDE:
 STORY PLOT: ${config.category} about "${config.titleEn}"`;
 }
 
-// Generate story text
+/**
+ * Convert generated pages to MongoDB page format
+ */
+function convertPageToMongoDB(page: GeneratedPage) {
+	return {
+		pageNumber: page.pageNumber,
+		text: page.textEn,
+		translations: {
+			th: page.textTh || page.translations?.th || '',
+			ja: page.translations?.ja || '',
+			zh: page.translations?.zh || '',
+			vi: page.translations?.vi || '',
+			id: page.translations?.id || ''
+		},
+		vocabulary: page.vocab.map(v => ({
+			word: v.word,
+			highlight: true
+		})),
+		audioUrl: '',
+		imageUrl: '',
+		wordTimestamps: []
+	};
+}
+
+/**
+ * Convert generated episode to MongoDB episode format
+ */
+function convertEpisodeToMongoDB(episode: GeneratedEpisode) {
+	return {
+		episodeNumber: episode.episodeNumber,
+		title: {
+			en: episode.titleEn,
+			th: episode.titleTh || ''
+		},
+		pages: episode.pages.map(convertPageToMongoDB),
+		vocabularyDetails: [],
+		miniGame: {
+			type: 'multipleChoice' as const,
+			questions: []
+		}
+	};
+}
+
+/**
+ * Generate story text using AI
+ */
 export async function generateStoryText(
 	storyId: string,
 	config: StoryConfig
 ): Promise<GeneratedStory> {
-	// Update story status to generating
-	await db
-		.update(stories)
-		.set({ status: 'generating', currentStep: 'text' })
-		.where(eq(stories.id, storyId));
-
-	// Create job record
-	const job = await db
-		.insert(jobs)
-		.values({
-			storyId,
-			type: 'text',
-			status: 'running',
-			progress: 0
-		})
-		.returning();
-
-	const jobId = job[0].id;
+	await dbConnect();
 
 	try {
+		// Update story status to generating
+		await getStoryModel().findByIdAndUpdate(storyId, {
+			'status': 'generating'
+		});
+
 		// Generate with AI
 		const prompt = getStoryPrompt(config);
 		const model = getModel();
@@ -152,80 +189,47 @@ export async function generateStoryText(
 
 		const generated: GeneratedStory = JSON.parse(jsonMatch[1] || jsonMatch[0]);
 
-		// Save episodes to database
-		for (const episode of generated.episodes) {
-			await db.insert(episodes).values({
-				storyId,
-				episodeNumber: episode.episodeNumber,
-				titleEn: episode.titleEn,
-				status: 'generated',
-				content: JSON.stringify(episode)
-			});
-		}
+		// Convert episodes to MongoDB format
+		const mongoDBepisodes = generated.episodes.map(convertEpisodeToMongoDB);
 
-		// Update story with generated content
-		await db
-			.update(stories)
-			.set({
-				content: JSON.stringify(generated),
-				status: 'reviewing',
-				currentStep: 'text'
-			})
-			.where(eq(stories.id, storyId));
-
-		// Mark job complete
-		await db
-			.update(jobs)
-			.set({
-				status: 'completed',
-				progress: 100,
-				result: JSON.stringify({ episodes: generated.episodes.length })
-			})
-			.where(eq(jobs.id, jobId));
+		// Update story with generated episodes
+		await getStoryModel().findByIdAndUpdate(storyId, {
+			episodes: mongoDBepisodes,
+			totalWords: generated.totalWords,
+			'status': 'reviewing'
+		});
 
 		return generated;
 	} catch (error) {
-		// Mark job failed
-		await db
-			.update(jobs)
-			.set({
-				status: 'failed',
-				error: String(error)
-			})
-			.where(eq(jobs.id, jobId));
-
-		// Reset story status
-		await db
-			.update(stories)
-			.set({ status: 'draft' })
-			.where(eq(stories.id, storyId));
-
+		// Reset story status on error
+		await getStoryModel().findByIdAndUpdate(storyId, {
+			'status': 'draft'
+		}).catch(() => {});
 		throw error;
 	}
 }
 
-// Regenerate specific episode
+/**
+ * Regenerate specific episode
+ */
 export async function regenerateEpisode(
 	storyId: string,
 	episodeNumber: number,
 	reason?: string
 ): Promise<GeneratedEpisode> {
-	const story = await db.query.stories.findFirst({
-		where: eq(stories.id, storyId)
-	});
+	await dbConnect();
 
+	const story = await getStoryModel().findById(storyId).lean();
 	if (!story) {
 		throw new Error('Story not found');
 	}
 
-	const config = JSON.parse(story.config || '{}');
-
-	const prompt = `Regenerate episode ${episodeNumber} of the story "${config.titleEn}".
+	const prompt = `Regenerate episode ${episodeNumber} of the story "${story.title.en}".
 
 ${reason ? `REASON FOR REGENERATION: ${reason}\n` : ''}Keep the same story context, but create fresh content.
 
 REQUIREMENTS:
-- CEFR Level: ${config.level}
+- CEFR Level: ${story.level}
 - 3 pages
 - Same style as before
 
@@ -233,6 +237,7 @@ Return ONLY valid JSON for this episode:
 {
   "episodeNumber": ${episodeNumber},
   "titleEn": "Episode Title",
+  "titleTh": "Thai Title",
   "pages": [...],
   "summary": "Summary"
 }`;
@@ -250,34 +255,29 @@ Return ONLY valid JSON for this episode:
 
 	const regenerated: GeneratedEpisode = JSON.parse(jsonMatch[0]);
 
-	// Update episode
-	const existing = await db.query.episodes.findFirst({
-		where: (eq(episodes.storyId, storyId), eq(episodes.episodeNumber, episodeNumber))
-	});
+	// Convert to MongoDB format
+	const mongoDBEpisode = convertEpisodeToMongoDB(regenerated);
 
-	if (existing) {
-		await db
-			.update(episodes)
-			.set({
-				titleEn: regenerated.titleEn,
-				content: JSON.stringify(regenerated),
-				status: 'generated'
-			})
-			.where(eq(episodes.id, existing.id));
+	// Update the specific episode in the story
+	const episodes = story.episodes || [];
+	const index = episodes.findIndex(ep => ep.episodeNumber === episodeNumber);
+
+	if (index >= 0) {
+		episodes[index] = mongoDBEpisode;
 	} else {
-		await db.insert(episodes).values({
-			storyId,
-			episodeNumber,
-			titleEn: regenerated.titleEn,
-			status: 'generated',
-			content: JSON.stringify(regenerated)
-		});
+		episodes.push(mongoDBEpisode);
 	}
+
+	await getStoryModel().findByIdAndUpdate(storyId, {
+		episodes
+	});
 
 	return regenerated;
 }
 
-// Stream generation progress
+/**
+ * Stream generation progress
+ */
 export async function streamStoryGeneration(
 	storyId: string,
 	config: StoryConfig
